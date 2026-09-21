@@ -1,77 +1,302 @@
-import{FaceDetector,FilesetResolver}from'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/vision_bundle.mjs';import{add}from'./base.js';const $=id=>document.getElementById(id),v=$('pushVideo'),c=$('pushCanvas'),x=c.getContext('2d');let fd,s,run=0,raf,ratio,up,down,reps=0,state='WAIT',cand='',since=0,last=-1;async function detector(){if(fd)return;let vis=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm'),o={baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite',delegate:'GPU'},runningMode:'VIDEO',minDetectionConfidence:.55};try{fd=await FaceDetector.createFromOptions(vis,o)}catch{o.baseOptions.delegate='CPU';fd=await FaceDetector.createFromOptions(vis,o)}}async function start(){try{s=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:960},height:{ideal:720}},audio:false});v.srcObject=s;await v.play();await detector();c.width=v.videoWidth;c.height=v.videoHeight;run=1;$('pushStart').disabled=1;$('pushStop').disabled=0;$('calUp').disabled=0;$('calDow').disabled=0;loop()}catch{alert('ë.m:êe:ço:­£;eg;'a;fe{'n;ef;!.;&¥	Ê__Y[˜Ý[ÛˆÝÜ
-Ø]™OLJ^Ü[LÚYŠ˜YŠXØ[˜Ù[[š[X][Û‘œ˜[YJ˜YŠNÚYŠÊ\Ë™Ù]˜XÚÜÊ
-K™›Ü‘XXÚ
-OœÝÜ
+import { FaceDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/vision_bundle.mjs";
+import { add } from "./base.js";
 
-JNÉ
-	Ü\ÚÝ\	ÊK™\ØX›YLÉ
-	Ü\ÚÝÜ	ÊK™\ØX›YLNÉ
-	ØØ[\	ÊK™\ØX›YI
-	ØØ[ÝÉÊK™\ØX›YLNÚYŠØ]™I‰œ™\ÊXY
-Ý\N‰Ü\Ú	Ë™\ßJ_Y[˜Ý[ÛˆÝX›JŠ^ÚYŠØ[™OO]
-^ØØ[™]ÜÚ[˜ÙO[ŽÜ™]\›ˆ\™]\›ˆ‹\Ú[˜ÙOŒNY[˜Ý[ÛˆÝ
-
-^É
-	ÜÝ]IÊK^ÛÛ[]Y[˜Ý[Ûˆ\]J‹Š^ÚYŠ\O[[ÝÛO[[ÝÛ]\
-ŒKŒJ\™]\›ˆÝ
-	ÐÐSP”UIÊNÛ]YÝÛ‹]\O]\
-Ù
-‹ŒÎ]\
-Ù
-‹ŒŽÚYŠÝ]OOOIÕÐRU	Ê^ÚYŠUI‰œÝX›J	ÕIËŠJ^ÜÝ]OIÕT	ÎØØ[™IÉÎÜÝ
-	ÕT	Ê__Y[ÙHYŠÝ]OOOIÕT	Ê^ÚYŠQ	‰œÝX›J	Ñ	ËŠJ^ÜÝ]OIÑÕÓ‰ÎØØ[™IÉÎÜÝ
-	ÑÕÓ‰Ê__Y[ÙHYŠÝ]OOOIÑÕÓ‰Ê^ÚYŠUI‰œÝX›J	Ô‰ËŠJ^ÜÝ]OIÕT	ÎØØ[™IÉÎÜ™\ÊÊÎÉ
-	Ü™\ÉÊK^ÛÛ[\™\ÎÜÝ
-	ÕT	ÊNÝž^ÜÜYXÚÞ[\Ú\Ë˜Ø[˜Ù[
+const $ = (id) => document.getElementById(id);
+const video = $("pushVideo");
+const canvas = $("pushCanvas");
+const ctx = canvas.getContext("2d");
 
-NÛ]O[™]ÈÜYXÚÞ[\Ú\Õ]\˜[˜ÙJÝš[™Ê™\ÊJNÜK›[™ÏIÚÛËRÔ‰ÎÜÜYXÚÞ[\Ú\ËœÜXZÊJ_XØ]Úß___Y[˜Ý[ÛˆÛÜ
+let detector = null;
+let stream = null;
+let running = false;
+let raf = null;
+let faceRatio = null;
+let upCalibration = null;
+let downCalibration = null;
+let reps = 0;
+let repState = "WAIT_UP";
+let candidate = "";
+let candidateSince = 0;
+let lastVideoTime = -1;
 
-^ÚYŠ\[Š\™]\›ŽÜ˜Y\™\]Y\Ý[š[X][Û‘œ˜[YJÛÜ
-NÚYŠY™‹œ™XYTÝ]OŸ‹˜Ý\œ™[[YOOO[\Ý
-\™]\›ŽÛ\Ý]‹˜Ý\œ™[[YNÛ]OY™™]XÝ›Ü•šY[Ê‹\™›Ü›X[˜ÙK››ÝÊ
-JK™]XÝ[ÛœÏË–ÌNÞ˜ÛX\”™XÝ
-ËÚYËšZYÚ
-NÚYŠ\J^Ü˜][Ï[[É
-	Ü˜][ÉÊK^ÛÛ[IÑPÑHKIIÎÜ™]\›Ÿ[]\K˜›Ý[™[™Ð›ÞÞœÝ›ÚÙTÝ[OIÈÍŽLŽL	ÎÞ›[™UÚYMÞœÝ›ÚÙT™XÝ
-‹›ÜšYÚ[–‹›ÜšYÚ[–K‹ÚY‹šZYÚ
-NÜ˜][ÏX‹ÚY
-˜‹šZYÚÊËÚY
-˜ËšZYÚ
-NÉ
-	Ü˜][ÉÊK^ÛÛ[XPÑH	Ê˜][ÊŒL
-KÑš^Y
-J_IXÝ\]J˜][Ë\™›Ü›X[˜ÙK››ÝÊ
-J_X\Þ[˜È[˜Ý[ÛˆØ[
-ÚXÚ
-^ÚYŠ˜][ÏO[[
-\™]\›ˆ[\
-	û%¯:­m;'m;.m:êe:çn;%ä:ìí;%ë;(ï;!.;&¥‰ÊNÛ]OV×K\\™›Ü›X[˜ÙK››ÝÊ
-NÝÚ[J\™›Ü›X[˜ÙK››ÝÊ
-K]L
-^ÚYŠ˜][ÊXKœ\Ú
-˜][ÊNØ]ØZ]™]È›ÛZ\ÙJOœÙ][Y[Ý]
-‹Œ
-J_XKœÛÜ
+const STABLE_MS = 180;
 
-KŠOO˜KXŠNÛ]OXVØK›[™ÝŒWNÚYŠÚXÚOOIÝ\	Ê^Ý\[NÉ
-	Ý\˜[	ÊK^ÛÛ[JJŒL
-KÑš^Y
-JJÉÉIßY[Ù^ÙÝÛ[NÉ
-	ÙÝÛ•˜[	ÊK^ÛÛ[JJŒL
-KÑš^Y
-JJÉÉIß\Ý]OIÕÐRU	ÎÜÝ
-\	‰™ÝÛÉÔ‘PQIÎ‰ÐÐSP”UIÊ_I
-	Ü\ÚÝ\	ÊK›Û˜ÛXÚÏ\Ý\É
-	Ü\ÚÝÜ	ÊK›Û˜ÛXÚÏJ
-OOœÝÜ
-JNÉ
-	Ü\Ú™\Ù]	ÊK›Û˜ÛXÚÏJ
-OOžÜ™\ÏLÜÝ]OIÕÐRU	ÎÉ
-	Ü™\ÉÊK^ÛÛ[LÜÝ
-	Ô‘PQIÊ_NÉ
-	ØØ[\	ÊK›Û˜ÛXÚÏJ
-OO˜Ø[
-	Ý\	ÊNÉ
-	ØØ[ÝÛ‰ÊK›Û˜ÛXÚÏJ
-OO˜Ø[
-	ÙÝÛ‰ÊN
+async function ensureDetector() {
+  if (detector) return;
+
+  $("pstate").textContent = "AI LOADING";
+
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm"
+  );
+
+  const options = {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite",
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO",
+    minDetectionConfidence: 0.55
+  };
+
+  try {
+    detector = await FaceDetector.createFromOptions(vision, options);
+  } catch {
+    options.baseOptions.delegate = "CPU";
+    detector = await FaceDetector.createFromOptions(vision, options);
+  }
+
+  $("pstate").textContent = "AI READY";
+}
+
+async function start() {
+  if (running) return;
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: "user" },
+        width: { ideal: 960 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30, max: 30 }
+      }
+    });
+
+    video.srcObject = stream;
+    await video.play();
+    await ensureDetector();
+
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+
+    running = true;
+    $("pushStart").disabled = true;
+    $("pushStop").disabled = false;
+    $("calUp").disabled = false;
+    $("calDown").disabled = false;
+
+    loop();
+  } catch (err) {
+    console.error(err);
+    alert("ì¹´ë©”ë¼ë¥¼ ì‹œìž‘í•  ìˆ˜ ì—†ìŠµë‹ˆë‹¤. Safari/Chromeì˜ ì¹´ë©”ë¼ ê¶Œí•œì„ í™•ì¸í•˜ì„¸ìš”.");
+    stop(false);
+  }
+}
+
+function stop(save = true) {
+  running = false;
+
+  if (raf) cancelAnimationFrame(raf);
+  if (stream) stream.getTracks().forEach((track) => track.stop());
+
+  stream = null;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  $("pushStart").disabled = false;
+  $("pushStop").disabled = true;
+  $("calUp").disabled = true;
+  $("calDown").disabled = true;
+
+  if (save && reps > 0) {
+    add({ type: "push", reps });
+  }
+}
+
+function setState(text) {
+  $("pstate").textContent = text;
+}
+
+function stable(target, now) {
+  if (candidate !== target) {
+    candidate = target;
+    candidateSince = now;
+    return false;
+  }
+  return now - candidateSince >= STABLE_MS;
+}
+
+function clearCandidate() {
+  candidate = "";
+  candidateSince = 0;
+}
+
+function updateRepState(ratio, now) {
+  if (
+    upCalibration == null ||
+    downCalibration == null ||
+    downCalibration <= upCalibration * 1.05
+  ) {
+    setState("CALIBRATE");
+    return;
+  }
+
+  const span = downCalibration - upCalibration;
+  const upThreshold = upCalibration + span * 0.38;
+  const downThreshold = upCalibration + span * 0.62;
+
+  if (repState === "WAIT_UP") {
+    if (ratio <= upThreshold && stable("UP_READY", now)) {
+      repState = "UP";
+      clearCandidate();
+      setState("UP");
+    } else if (ratio > upThreshold) {
+      clearCandidate();
+    }
+    return;
+  }
+
+  if (repState === "UP") {
+    if (ratio >= downThreshold && stable("DOWN", now)) {
+      repState = "DOWN";
+      clearCandidate();
+      setState("DOWN");
+    } else if (ratio < downThreshold) {
+      clearCandidate();
+    }
+    return;
+  }
+
+  if (repState === "DOWN") {
+    if (ratio <= upThreshold && stable("REP_UP", now)) {
+      repState = "UP";
+      clearCandidate();
+      reps += 1;
+      $("reps").textContent = String(reps);
+      setState("UP");
+
+      if ("speechSynthesis" in window) {
+        try {
+          speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(String(reps));
+          utterance.lang = "ko-KR";
+          utterance.rate = 1.15;
+          speechSynthesis.speak(utterance);
+        } catch {}
+      }
+    } else if (ratio > upThreshold) {
+      clearCandidate();
+    }
+  }
+}
+
+function drawFace(box) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.strokeStyle = "#68e290";
+  ctx.lineWidth = Math.max(3, canvas.width * 0.004);
+  ctx.strokeRect(box.originX, box.originY, box.width, box.height);
+  ctx.restore();
+}
+
+function loop() {
+  if (!running) return;
+
+  raf = requestAnimationFrame(loop);
+
+  if (!detector || video.readyState < 2) return;
+  if (video.currentTime === lastVideoTime) return;
+
+  lastVideoTime = video.currentTime;
+
+  let result;
+  try {
+    result = detector.detectForVideo(video, performance.now());
+  } catch (err) {
+    console.error(err);
+    return;
+  }
+
+  const detection = result?.detections?.[0];
+
+  if (!detection?.boundingBox) {
+    faceRatio = null;
+    $("ratio").textContent = "FACE --%";
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    clearCandidate();
+    return;
+  }
+
+  const box = detection.boundingBox;
+  drawFace(box);
+
+  faceRatio =
+    (box.width * box.height) / (canvas.width * canvas.height);
+
+  $("ratio").textContent = `FACE ${(faceRatio * 100).toFixed(1)}%`;
+
+  updateRepState(faceRatio, performance.now());
+}
+
+async function calibrate(which) {
+  if (faceRatio == null) {
+    alert("ì–¼êµ´ì´ ì¹´ë©”ë¼ì— ë³´ì´ê²Œ í•´ì£¼ì„¸ìš”.");
+    return;
+  }
+
+  const samples = [];
+  const startedAt = performance.now();
+  const button = which === "up" ? $("calUp") : $("calDown");
+
+  button.disabled = true;
+
+  while (performance.now() - startedAt < 900) {
+    if (faceRatio != null) samples.push(faceRatio);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  }
+
+  button.disabled = false;
+
+  if (samples.length < 5) {
+    alert("ì–¼êµ´ì„ ì•ˆì •ì ìœ¼ë¡œ ì¸ì‹í•˜ì§€ ëª»í–ˆìŠµë‹ˆë‹¤. ë‹¤ì‹œ ì‹œë„í•˜ì„¸ìš”.");
+    return;
+  }
+
+  samples.sort((a, b) => a - b);
+  const median = samples[Math.floor(samples.length / 2)];
+
+  if (which === "up") {
+    upCalibration = median;
+    $("upVal").textContent = `${(median * 100).toFixed(1)}%`;
+  } else {
+    downCalibration = median;
+    $("downVal").textContent = `${(median * 100).toFixed(1)}%`;
+  }
+
+  repState = "WAIT_UP";
+  clearCandidate();
+
+  if (
+    upCalibration != null &&
+    downCalibration != null &&
+    downCalibration <= upCalibration * 1.05
+  ) {
+    setState("RECALIBRATE");
+    alert("UPê³¼ DOWNì˜ ì–¼êµ´ ê±°ë¦¬ ì°¨ì´ê°€ ë„ˆë¬´ ìž‘ìŠµë‹ˆë‹¤. í° ìœ„ì¹˜ë¥¼ ì¡°ì •í•˜ê³  ë‹¤ì‹œ ë³´ì •í•˜ì„¸ìš”.");
+    return;
+  }
+
+  setState(
+    upCalibration != null && downCalibration != null
+      ? "READY"
+      : "CALIBRATE"
+  );
+}
+
+$("pushStart").onclick = start;
+$("pushStop").onclick = () => stop(true);
+$("pushReset").onclick = () => {
+  reps = 0;
+  repState = "WAIT_UP";
+  clearCandidate();
+  $("reps").textContent = "0";
+  setState("READY");
+};
+
+$("calUp").onclick = () => calibrate("up");
+$("calDown").onclick = () => calibrate("down");
+
+window.addEventListener("pagehide", () => {
+  if (running) stop(false);
+});
