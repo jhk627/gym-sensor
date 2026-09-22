@@ -23,7 +23,14 @@ let reps = 0;
 let repState = "WAIT_UP";
 let candidate = "";
 let candidateHits = 0;
+let skipStopSave = false;
 
+let challengeMode = false;
+let challengeCounting = false;
+let challengeTimer = null;
+let challengeEndsAt = 0;
+
+const CHALLENGE_PB_KEY = "gymSensorPush60PB";
 const PROCESS_MS = 90;
 const REQUIRED_HITS = 2;
 const SMOOTH_WINDOW = 5;
@@ -62,6 +69,24 @@ function calibrationReady() {
   );
 }
 
+function updateChallengeAvailability() {
+  const ready = running && calibrationReady() && !challengeMode;
+  $("challengeStart").disabled = !ready;
+
+  if (challengeMode) return;
+
+  if (!running) {
+    $("challengeStatus").textContent =
+      "카메라를 켜고 UP/DOWN을 보정하세요.";
+  } else if (!calibrationReady()) {
+    $("challengeStatus").textContent =
+      "UP과 DOWN 두 자세를 먼저 보정하세요.";
+  } else {
+    $("challengeStatus").textContent =
+      "준비 완료 · 버튼을 누르면 3초 뒤 60초 측정이 시작됩니다.";
+  }
+}
+
 function updateDebug() {
   const cur = smoothWidth == null ? "--" : (smoothWidth * 100).toFixed(1) + "%";
   const up = upCalibration == null ? "--" : (upCalibration * 100).toFixed(1) + "%";
@@ -97,6 +122,23 @@ function drawBox(box) {
   ctx.lineWidth = Math.max(3, canvas.width * 0.006);
   ctx.strokeRect(x, y, w, h);
   ctx.restore();
+}
+
+function countRep() {
+  if (challengeMode && !challengeCounting) return;
+
+  reps += 1;
+  $("reps").textContent = String(reps);
+
+  if ("speechSynthesis" in window) {
+    try {
+      speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(String(reps));
+      utterance.lang = "ko-KR";
+      utterance.rate = 1.15;
+      speechSynthesis.speak(utterance);
+    } catch {}
+  }
 }
 
 function updateState(value) {
@@ -153,19 +195,8 @@ function updateState(value) {
       if (hit("REP_UP")) {
         repState = "UP";
         clearCandidate();
-        reps += 1;
-        $("reps").textContent = String(reps);
         setState("UP");
-
-        if ("speechSynthesis" in window) {
-          try {
-            speechSynthesis.cancel();
-            const utterance = new SpeechSynthesisUtterance(String(reps));
-            utterance.lang = "ko-KR";
-            utterance.rate = 1.15;
-            speechSynthesis.speak(utterance);
-          } catch {}
-        }
+        countRep();
       }
     } else {
       clearCandidate();
@@ -188,7 +219,6 @@ function onResults(results) {
     return;
   }
 
-  // Choose the largest face in case another face appears in the background.
   const detection = detections.reduce((best, cur) => {
     const b = cur.boundingBox;
     const bb = best?.boundingBox;
@@ -231,7 +261,6 @@ async function ensureDetector() {
 
   detector.onResults(onResults);
 
-  // First send initializes WASM/model assets.
   await detector.send({ image: video });
 
   setState("FACE READY");
@@ -303,6 +332,7 @@ async function start() {
 
     setState(calibrationReady() ? "MOVE TO UP" : "CALIBRATE");
     updateDebug();
+    updateChallengeAvailability();
 
     raf = requestAnimationFrame(loop);
   } catch (err) {
@@ -319,7 +349,30 @@ async function start() {
   }
 }
 
+function cancelChallenge(showMessage = true) {
+  challengeMode = false;
+  challengeCounting = false;
+  challengeEndsAt = 0;
+
+  if (challengeTimer) {
+    clearInterval(challengeTimer);
+    challengeTimer = null;
+  }
+
+  document.querySelector(".challenge-panel")?.classList.remove("live");
+
+  $("challengeTime").textContent = "01:00";
+
+  if (showMessage) {
+    $("challengeStatus").textContent = "챌린지가 취소되었습니다.";
+  }
+
+  updateChallengeAvailability();
+}
+
 function stop(save = true) {
+  if (challengeMode) cancelChallenge(false);
+
   running = false;
 
   if (raf) cancelAnimationFrame(raf);
@@ -338,17 +391,24 @@ function stop(save = true) {
   $("pushStop").disabled = true;
   $("calUp").disabled = true;
   $("calDown").disabled = true;
+  $("challengeStart").disabled = true;
 
-  if (save && reps > 0) {
+  if (save && reps > 0 && !skipStopSave) {
     add({ type: "push", reps });
   }
 
   setState("READY");
+  updateChallengeAvailability();
 }
 
 async function calibrate(which) {
   if (!running) {
     alert("먼저 START를 눌러 카메라를 시작하세요.");
+    return;
+  }
+
+  if (challengeMode) {
+    alert("챌린지 중에는 보정할 수 없습니다.");
     return;
   }
 
@@ -397,6 +457,7 @@ async function calibrate(which) {
     Math.abs(downCalibration - upCalibration) < MIN_GAP
   ) {
     setState("RECALIBRATE");
+    updateChallengeAvailability();
     alert(
       "UP과 DOWN 얼굴 크기 차이가 너무 작습니다.\n\n폰을 얼굴 앞쪽에 두고 DOWN에서 얼굴이 확실히 더 크게 보이도록 다시 보정해 주세요."
     );
@@ -404,21 +465,158 @@ async function calibrate(which) {
   }
 
   setState(calibrationReady() ? "MOVE TO UP" : "CALIBRATE");
+  updateChallengeAvailability();
 }
+
+function speak(text) {
+  if (!("speechSynthesis" in window)) return;
+  try {
+    speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "ko-KR";
+    utterance.rate = 1.1;
+    speechSynthesis.speak(utterance);
+  } catch {}
+}
+
+function formatChallengeTime(ms) {
+  const sec = Math.max(0, Math.ceil(ms / 1000));
+  return "00:" + String(sec).padStart(2, "0");
+}
+
+function finishChallenge() {
+  if (!challengeMode) return;
+
+  challengeMode = false;
+  challengeCounting = false;
+
+  if (challengeTimer) {
+    clearInterval(challengeTimer);
+    challengeTimer = null;
+  }
+
+  $("challengeTime").textContent = "00:00";
+  document.querySelector(".challenge-panel")?.classList.remove("live");
+  document.querySelector(".challenge-panel")?.classList.add("finished");
+
+  const score = reps;
+  const oldPB = Number(localStorage.getItem(CHALLENGE_PB_KEY) || 0);
+  const isPB = score > oldPB;
+  const newPB = Math.max(oldPB, score);
+
+  localStorage.setItem(CHALLENGE_PB_KEY, String(newPB));
+  $("challengePB").textContent = String(newPB);
+  $("challengeLast").textContent = String(score);
+
+  $("challengeStatus").textContent = isPB
+    ? "NEW PERSONAL BEST! · " + score + " reps"
+    : "FINISH · " + score + " reps · PB " + newPB;
+
+  add({ type: "push60", reps: score, duration: 60 });
+  skipStopSave = true;
+
+  setState("FINISH");
+  speak("종료. " + score + "회");
+
+  updateChallengeAvailability();
+}
+
+function updateChallengeTimer() {
+  if (!challengeMode || !challengeCounting) return;
+
+  const remain = challengeEndsAt - performance.now();
+  $("challengeTime").textContent = formatChallengeTime(remain);
+
+  if (remain <= 0) {
+    finishChallenge();
+  }
+}
+
+async function startChallenge() {
+  if (!running) {
+    alert("먼저 카메라를 시작하세요.");
+    return;
+  }
+
+  if (!calibrationReady()) {
+    alert("챌린지 전에 UP과 DOWN을 먼저 보정하세요.");
+    return;
+  }
+
+  if (challengeMode) return;
+
+  challengeMode = true;
+  challengeCounting = false;
+  skipStopSave = false;
+
+  document.querySelector(".challenge-panel")?.classList.remove("finished");
+  document.querySelector(".challenge-panel")?.classList.add("live");
+
+  $("challengeStart").disabled = true;
+  $("calUp").disabled = true;
+  $("calDown").disabled = true;
+
+  reps = 0;
+  $("reps").textContent = "0";
+  repState = "WAIT_UP";
+  clearCandidate();
+
+  for (let n = 3; n >= 1; n--) {
+    if (!challengeMode || !running) return;
+
+    $("challengeTime").textContent = "00:0" + n;
+    $("challengeStatus").textContent = n + "초 후 시작";
+    setState(String(n));
+    speak(String(n));
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  if (!challengeMode || !running) return;
+
+  reps = 0;
+  $("reps").textContent = "0";
+  repState = "WAIT_UP";
+  clearCandidate();
+
+  challengeCounting = true;
+  challengeEndsAt = performance.now() + 60000;
+
+  $("challengeTime").textContent = "01:00";
+  $("challengeStatus").textContent = "GO! · 60초 동안 최대 횟수에 도전하세요.";
+  setState("GO");
+  speak("시작");
+
+  challengeTimer = setInterval(updateChallengeTimer, 100);
+}
+
+const savedPB = Number(localStorage.getItem(CHALLENGE_PB_KEY) || 0);
+$("challengePB").textContent = String(savedPB);
 
 $("pushStart").addEventListener("click", start);
 $("pushStop").addEventListener("click", () => stop(true));
 
 $("pushReset").addEventListener("click", () => {
+  if (challengeMode) {
+    cancelChallenge(true);
+  }
+
   reps = 0;
   repState = "WAIT_UP";
+  skipStopSave = false;
   clearCandidate();
+
   $("reps").textContent = "0";
+  $("challengeTime").textContent = "01:00";
+  document.querySelector(".challenge-panel")?.classList.remove("finished");
+
   setState(calibrationReady() ? "MOVE TO UP" : "READY");
+  updateChallengeAvailability();
 });
 
 $("calUp").addEventListener("click", () => calibrate("up"));
 $("calDown").addEventListener("click", () => calibrate("down"));
+$("challengeStart").addEventListener("click", startChallenge);
 
 window.addEventListener("pagehide", () => {
   if (running) stop(false);
