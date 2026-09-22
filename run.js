@@ -12,6 +12,99 @@ let lastStepAt = 0;
 let cadenceLast = null;
 let hrLast = null;
 
+const AGE_KEY = "gymSensorAge";
+let userAge = null;
+
+function getAge() {
+  const v = Number($("ageInput")?.value);
+  return Number.isFinite(v) && v >= 15 && v <= 90 ? v : null;
+}
+
+function zoneInfo(age) {
+  if (!age) return null;
+
+  const maxHr = 220 - age;
+  const moderateLow = Math.round(maxHr * 0.50);
+  const moderateHigh = Math.round(maxHr * 0.70);
+  const vigorousLow = Math.round(maxHr * 0.70);
+  const vigorousHigh = Math.round(maxHr * 0.85);
+
+  return {
+    maxHr,
+    moderateLow,
+    moderateHigh,
+    vigorousLow,
+    vigorousHigh
+  };
+}
+
+function updateHeartRateGuide(bpm = hrLast) {
+  const age = getAge();
+  const label = $("zoneLabel");
+  const text = $("zoneText");
+  const ranges = $("zoneRanges");
+
+  if (!label || !text || !ranges) return;
+
+  if (!age) {
+    label.textContent = "AGE REQUIRED";
+    text.textContent =
+      "나이를 입력하면 예상 최대심박수와 운동 강도 구간을 계산합니다.";
+    ranges.textContent = "";
+    return;
+  }
+
+  userAge = age;
+  localStorage.setItem(AGE_KEY, String(age));
+
+  const z = zoneInfo(age);
+
+  ranges.innerHTML =
+    "예상 최대심박수 " +
+    z.maxHr +
+    " bpm<br>중강도 " +
+    z.moderateLow +
+    "–" +
+    z.moderateHigh +
+    " bpm · 고강도 " +
+    z.vigorousLow +
+    "–" +
+    z.vigorousHigh +
+    " bpm";
+
+  if (!Number.isFinite(bpm)) {
+    label.textContent = "TARGET READY";
+    text.textContent =
+      "체중관리 목적의 지속 가능한 유산소는 중강도 구간을 기본 참고 범위로 사용할 수 있습니다.";
+    return;
+  }
+
+  const hr = Math.round(bpm);
+
+  if (hr < z.moderateLow) {
+    label.textContent = "REST / LOW";
+    text.textContent =
+      hr +
+      " bpm · 현재는 중강도 운동 구간보다 낮습니다. 휴식 중 측정값이라면 자연스러울 수 있습니다.";
+  } else if (hr < z.vigorousLow) {
+    label.textContent = "MODERATE";
+    text.textContent =
+      hr +
+      " bpm · 지속 가능한 유산소 강도 구간입니다. 체중관리용 러닝의 기본 참고 구간으로 사용할 수 있습니다.";
+  } else if (hr <= z.vigorousHigh) {
+    label.textContent = "VIGOROUS";
+    text.textContent =
+      hr +
+      " bpm · 높은 운동 강도 구간입니다. 같은 시간을 운동하면 부담이 더 커질 수 있습니다.";
+  } else {
+    label.textContent = "VERY HIGH";
+    text.textContent =
+      hr +
+      " bpm · 예상 최대심박수의 85%를 넘는 높은 강도입니다. 측정 오류 여부와 운동 강도를 함께 확인하세요.";
+  }
+}
+
+
 async function requestMotionPermission() {
   if (
     typeof DeviceMotionEvent !== "undefined" &&
@@ -58,6 +151,16 @@ function onMotion(e) {
     }
   }
 }
+
+const savedAge = localStorage.getItem(AGE_KEY);
+if (savedAge && $("ageInput")) {
+  $("ageInput").value = savedAge;
+  userAge = Number(savedAge);
+}
+if ($("ageInput")) {
+  $("ageInput").addEventListener("input", () => updateHeartRateGuide(hrLast));
+}
+updateHeartRateGuide();
 
 $("runStart").onclick = async () => {
   try {
@@ -471,6 +574,7 @@ function heartLoop() {
       if (stableHr != null) {
         hrLast = stableHr;
         $("hr").textContent = Math.round(stableHr);
+        updateHeartRateGuide(stableHr);
       }
 
       // Good signal for ~15 s: finish early.
