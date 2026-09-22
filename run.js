@@ -1,1 +1,493 @@
-import{add,fmt}from'./base.js';const $=id=>document.getElementById(id);let run=0,start=0,tick,steps=[],last=0,cad=null,hrLast=null;async function motion(){if(typeof DeviceMotionEvent!='undefined'&&typeof DeviceMotionEvent.requestPermission==='function'&&await DeviceMotionEvent.requestPermission()!=='granted')throw Error('모션 센서 권한이 필요합니다.')}function dm(e){let a=e.accelerationIncludingGravity;if(!a||[a.x,a.y,a.z].some(x=>typeof x!=='number'))return;let m=Math.hypot(a.x,a.y,a.z),n=performance.now();if(m>11&&n-last>250){last=n;steps.push(n);steps=steps.filter(x=>n-x<15000);if(steps.length>3){let z=[];for(let i=1;i<steps.length;i++)z.push(steps[i]-steps[i-1]);z.sort((a,b)=>a-b);let q=z.slice(1,-1),v=60000/(q.reduce((a,b)=>a+b,0)/q.length);if(v>60&&v<240){cad=v;$('cadence').textContent=Math.round(v)}}}}$('runStart').onclick=async()=>{try{await motion();run=1;start=performance.now();steps=[];window.addEventListener('devicemotion',dm);tick=setInterval(()=>$('timer').textContent=fmt((performance.now()-start)/1000),250);$('runState').textContent='RUNNING';$('runStart').disabled=1;$('runStop').disabled=0}catch(e){alert(e.message)}};$('runStop').onclick=()=>{if(!run)return;let d=(performance.now()-start)/1000;run=0;clearInterval(tick);window.removeEventListener('devicemotion',dm);$('runState').textContent='SAVED';$('runStart').disabled=0;$('runStop').disabled=1;add({type:'run',duration:d,cadence:cad,hr:hrLast})};let stream,active=0,samples=[],st,raf,v=$('hrVideo'),c=$('hrCanvas'),cx=c.getContext('2d',{willReadFrequently:true});function est(){if(samples.length<120)return null;let a=samples.slice(-450),fs=30,n=a.length,mean=a.reduce((s,x)=>s+x.v,0)/n,x=a.map(o=>o.v-mean),best=[0,-1];for(let lag=9;lag<=40;lag++){let p=0,d1=0,d2=0;for(let i=lag;i<n;i++){p+=x[i]*x[i-lag];d1+=x[i]*x[i];d2+=x[i-lag]*x[i-lag]}let r=p/Math.sqrt(d1*d2||1);if(r>best[1])best=[lag,r]}return{bpm:1800/best[0],q:best[1]}}async function hs(){try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},frameRate:{ideal:30}},audio:false});v.srcObject=stream;await v.play();active=1;samples=[];st=performance.now();$('hrBox').classList.remove('hidden');loop()}catch{alert('카메라 권한을 확인하세요')}}function stop(){active=0;if(raf)cancelAnimationFrame(raf);if(stream)stream.getTracks().forEach(t=>t.stop());$('hrBox').classList.add('hidden')}function loop(){if(!active)return;raf=requestAnimationFrame(loop);if(v.readyState<2)return;cx.drawImage(v,0,0,24,24);let d=cx.getImageData(0,0,24,24).data,r=0,g=0,b=0,n=d.length/4;for(let i=0;i<d.length;i+=4){r+=d[i];g+=d[i+1];b+=d[i+2]}r/=n;g/=n;b/=n;let finger=r>55&&r/(g+b+1)>.7;if(finger)samples.push({v:r/(r+g+b+1)});let e=est();$('hrQ').textContent=finger?(e?`신호 ${(e.q*100|0)}% · 약 ${e.bpm|0} bpm`:'분석 중'):'손가락 접촉 확인';if(e&&e.q>.3&&e.bpm>45&&e.bpm<200){hrLast=e.bpm;$('hr').textContent=e.bpm|0}if(performance.now()-st>20000)stop()}$('hrStart').onclick=hs;$('hrCancel').onclick=stop;
+import { add, fmt } from "./base.js";
+
+const $ = (id) => document.getElementById(id);
+
+/* ---------------- RUN / CADENCE ---------------- */
+
+let runActive = false;
+let runStartedAt = 0;
+let runTimerId = null;
+let stepTimes = [];
+let lastStepAt = 0;
+let cadenceLast = null;
+let hrLast = null;
+
+async function requestMotionPermission() {
+  if (
+    typeof DeviceMotionEvent !== "undefined" &&
+    typeof DeviceMotionEvent.requestPermission === "function"
+  ) {
+    const result = await DeviceMotionEvent.requestPermission();
+    if (result !== "granted") {
+      throw new Error("모션 센서 권한이 필요합니다.");
+    }
+  }
+}
+
+function onMotion(e) {
+  const a = e.accelerationIncludingGravity;
+  if (!a || [a.x, a.y, a.z].some((x) => typeof x !== "number")) return;
+
+  const magnitude = Math.hypot(a.x, a.y, a.z);
+  const now = performance.now();
+
+  if (magnitude > 11 && now - lastStepAt > 250) {
+    lastStepAt = now;
+    stepTimes.push(now);
+    stepTimes = stepTimes.filter((x) => now - x < 15000);
+
+    if (stepTimes.length > 3) {
+      const intervals = [];
+      for (let i = 1; i < stepTimes.length; i++) {
+        intervals.push(stepTimes[i] - stepTimes[i - 1]);
+      }
+
+      intervals.sort((a, b) => a - b);
+      const trimmed =
+        intervals.length > 4 ? intervals.slice(1, -1) : intervals;
+
+      const avg =
+        trimmed.reduce((a, b) => a + b, 0) / Math.max(1, trimmed.length);
+
+      const spm = 60000 / avg;
+
+      if (spm > 60 && spm < 240) {
+        cadenceLast = spm;
+        $("cadence").textContent = Math.round(spm);
+      }
+    }
+  }
+}
+
+$("runStart").onclick = async () => {
+  try {
+    await requestMotionPermission();
+
+    runActive = true;
+    runStartedAt = performance.now();
+    stepTimes = [];
+    cadenceLast = null;
+
+    window.addEventListener("devicemotion", onMotion);
+
+    runTimerId = setInterval(() => {
+      $("timer").textContent = fmt(
+        (performance.now() - runStartedAt) / 1000
+      );
+    }, 250);
+
+    $("runState").textContent = "RUNNING";
+    $("runStart").disabled = true;
+    $("runStop").disabled = false;
+  } catch (e) {
+    alert(e.message);
+  }
+};
+
+$("runStop").onclick = () => {
+  if (!runActive) return;
+
+  const duration = (performance.now() - runStartedAt) / 1000;
+
+  runActive = false;
+  clearInterval(runTimerId);
+  window.removeEventListener("devicemotion", onMotion);
+
+  $("runState").textContent = "SAVED";
+  $("runStart").disabled = false;
+  $("runStop").disabled = true;
+
+  add({
+    type: "run",
+    duration,
+    cadence: cadenceLast,
+    hr: hrLast
+  });
+};
+
+/* ---------------- CAMERA PPG HEART RATE ---------------- */
+
+let hrStream = null;
+let hrTrack = null;
+let hrActive = false;
+let hrSamples = [];
+let hrStartedAt = 0;
+let hrRaf = null;
+let torchEnabled = false;
+let lastFingerSeenAt = 0;
+let stableEstimates = [];
+
+const hrVideo = $("hrVideo");
+const hrCanvas = $("hrCanvas");
+const hrCtx = hrCanvas.getContext("2d", { willReadFrequently: true });
+
+function stopTorch() {
+  if (!hrTrack || !torchEnabled) return;
+
+  try {
+    hrTrack.applyConstraints({
+      advanced: [{ torch: false }]
+    });
+  } catch {}
+
+  torchEnabled = false;
+}
+
+async function tryEnableTorch(track) {
+  try {
+    const caps = track.getCapabilities?.();
+
+    if (!caps || !caps.torch) {
+      return false;
+    }
+
+    await track.applyConstraints({
+      advanced: [{ torch: true }]
+    });
+
+    return true;
+  } catch (err) {
+    console.warn("Torch unavailable:", err);
+    return false;
+  }
+}
+
+function resample(samples, fs = 30) {
+  if (samples.length < 2) return [];
+
+  const t0 = samples[0].t;
+  const t1 = samples[samples.length - 1].t;
+  const duration = (t1 - t0) / 1000;
+
+  if (duration <= 0) return [];
+
+  const n = Math.floor(duration * fs);
+  const out = new Array(n);
+
+  let j = 0;
+
+  for (let i = 0; i < n; i++) {
+    const target = t0 + (i * 1000) / fs;
+
+    while (
+      j + 1 < samples.length &&
+      samples[j + 1].t < target
+    ) {
+      j++;
+    }
+
+    const a = samples[j];
+    const b = samples[Math.min(j + 1, samples.length - 1)];
+
+    const dt = b.t - a.t;
+    const w = dt > 0 ? (target - a.t) / dt : 0;
+
+    out[i] = a.v + (b.v - a.v) * Math.max(0, Math.min(1, w));
+  }
+
+  return out;
+}
+
+function detrend(values, fs = 30) {
+  const n = values.length;
+  if (!n) return [];
+
+  const radius = Math.max(1, Math.round(fs * 0.6));
+  const prefix = new Array(n + 1).fill(0);
+
+  for (let i = 0; i < n; i++) {
+    prefix[i + 1] = prefix[i] + values[i];
+  }
+
+  const out = new Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const lo = Math.max(0, i - radius);
+    const hi = Math.min(n, i + radius + 1);
+
+    const mean =
+      (prefix[hi] - prefix[lo]) / Math.max(1, hi - lo);
+
+    out[i] = values[i] - mean;
+  }
+
+  // light 3-point smoothing
+  return out.map((_, i) => {
+    let sum = 0;
+    let count = 0;
+
+    for (let k = Math.max(0, i - 1); k <= Math.min(n - 1, i + 1); k++) {
+      sum += out[k];
+      count++;
+    }
+
+    return sum / count;
+  });
+}
+
+function estimateHeartRate() {
+  if (hrSamples.length < 120) return null;
+
+  const recent = hrSamples.slice(-600);
+  const duration =
+    (recent[recent.length - 1].t - recent[0].t) / 1000;
+
+  if (duration < 7) return null;
+
+  const fs = 30;
+  const uniform = resample(recent, fs);
+
+  if (uniform.length < fs * 7) return null;
+
+  const signal = detrend(uniform, fs);
+  const mean =
+    signal.reduce((a, b) => a + b, 0) / signal.length;
+
+  const centered = signal.map((v) => v - mean);
+
+  const energy =
+    centered.reduce((a, b) => a + b * b, 0) /
+    Math.max(1, centered.length);
+
+  if (energy < 0.000001) return null;
+
+  const minBpm = 45;
+  const maxBpm = 200;
+
+  const minLag = Math.floor((fs * 60) / maxBpm);
+  const maxLag = Math.ceil((fs * 60) / minBpm);
+
+  let bestLag = 0;
+  let bestCorr = -1;
+
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let numerator = 0;
+    let d1 = 0;
+    let d2 = 0;
+
+    for (let i = lag; i < centered.length; i++) {
+      const x = centered[i];
+      const y = centered[i - lag];
+
+      numerator += x * y;
+      d1 += x * x;
+      d2 += y * y;
+    }
+
+    const corr =
+      numerator / Math.sqrt(Math.max(1e-12, d1 * d2));
+
+    if (corr > bestCorr) {
+      bestCorr = corr;
+      bestLag = lag;
+    }
+  }
+
+  if (!bestLag) return null;
+
+  return {
+    bpm: (60 * fs) / bestLag,
+    quality: bestCorr
+  };
+}
+
+function medianNumber(values) {
+  if (!values.length) return null;
+
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+async function startHeartRate() {
+  if (hrActive) return;
+
+  try {
+    hrStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+        frameRate: { ideal: 30, max: 30 }
+      }
+    });
+
+    hrTrack = hrStream.getVideoTracks()[0];
+
+    hrVideo.srcObject = hrStream;
+    hrVideo.setAttribute("playsinline", "");
+    hrVideo.muted = true;
+
+    await hrVideo.play();
+
+    torchEnabled = await tryEnableTorch(hrTrack);
+
+    hrActive = true;
+    hrSamples = [];
+    stableEstimates = [];
+    hrStartedAt = performance.now();
+    lastFingerSeenAt = 0;
+
+    $("hrBox").classList.remove("hidden");
+
+    $("hrMsg").textContent =
+      "렌즈와 플래시를 검지로 함께 덮고 움직이지 마세요";
+
+    $("hrQ").textContent = torchEnabled
+      ? "FLASH ON · 손가락 접촉 대기"
+      : "FLASH 제어 미지원 · 밝은 곳에서 측정하세요";
+
+    heartLoop();
+  } catch (err) {
+    console.error(err);
+    alert("후면 카메라를 열 수 없습니다. Safari의 카메라 권한을 확인하세요.");
+    stopHeartRate();
+  }
+}
+
+function stopHeartRate() {
+  hrActive = false;
+
+  if (hrRaf) cancelAnimationFrame(hrRaf);
+  hrRaf = null;
+
+  stopTorch();
+
+  if (hrStream) {
+    hrStream.getTracks().forEach((t) => t.stop());
+  }
+
+  hrStream = null;
+  hrTrack = null;
+
+  $("hrBox").classList.add("hidden");
+}
+
+function heartLoop() {
+  if (!hrActive) return;
+
+  hrRaf = requestAnimationFrame(heartLoop);
+
+  if (hrVideo.readyState < 2) return;
+
+  hrCtx.drawImage(hrVideo, 0, 0, 24, 24);
+
+  const data = hrCtx.getImageData(0, 0, 24, 24).data;
+
+  let r = 0;
+  let g = 0;
+  let b = 0;
+
+  const n = data.length / 4;
+
+  for (let i = 0; i < data.length; i += 4) {
+    r += data[i];
+    g += data[i + 1];
+    b += data[i + 2];
+  }
+
+  r /= n;
+  g /= n;
+  b /= n;
+
+  const brightness = (r + g + b) / 3;
+  const redFraction = r / Math.max(1, r + g + b);
+
+  // Finger over an illuminated rear camera usually becomes bright/red.
+  const fingerPresent =
+    brightness > 22 &&
+    r > 45 &&
+    redFraction > 0.39;
+
+  const now = performance.now();
+  const elapsed = (now - hrStartedAt) / 1000;
+
+  if (fingerPresent) {
+    lastFingerSeenAt = now;
+
+    // Normalize the green channel by total intensity.
+    // This reduces slow exposure changes while retaining the pulse component.
+    const value = g / Math.max(1, r + g + b);
+
+    hrSamples.push({
+      t: now,
+      v: value
+    });
+
+    if (hrSamples.length > 700) {
+      hrSamples = hrSamples.slice(-700);
+    }
+  } else {
+    if (
+      lastFingerSeenAt &&
+      now - lastFingerSeenAt > 500
+    ) {
+      hrSamples = [];
+      stableEstimates = [];
+    }
+  }
+
+  const est = estimateHeartRate();
+
+  $("hrMsg").textContent =
+    "렌즈와 플래시를 덮고 그대로 유지 · " +
+    Math.min(20, Math.floor(elapsed)) +
+    "s / 20s";
+
+  if (!fingerPresent) {
+    $("hrQ").textContent = torchEnabled
+      ? "FLASH ON · 손가락 접촉을 확인하세요"
+      : "손가락 접촉을 확인하세요";
+  } else if (!est) {
+    $("hrQ").textContent = torchEnabled
+      ? "FLASH ON · PPG 신호 수집 중"
+      : "PPG 신호 수집 중";
+  } else {
+    const qualityPct = Math.max(
+      0,
+      Math.min(100, Math.round(est.quality * 100))
+    );
+
+    $("hrQ").textContent =
+      "신호 품질 " +
+      qualityPct +
+      "% · 약 " +
+      Math.round(est.bpm) +
+      " bpm";
+
+    if (
+      est.quality > 0.32 &&
+      est.bpm >= 45 &&
+      est.bpm <= 200
+    ) {
+      stableEstimates.push(est.bpm);
+
+      if (stableEstimates.length > 8) {
+        stableEstimates.shift();
+      }
+
+      const stableHr = medianNumber(stableEstimates);
+
+      if (stableHr != null) {
+        hrLast = stableHr;
+        $("hr").textContent = Math.round(stableHr);
+      }
+
+      // Good signal for ~15 s: finish early.
+      if (
+        elapsed >= 15 &&
+        stableEstimates.length >= 5
+      ) {
+        stopHeartRate();
+        return;
+      }
+    }
+  }
+
+  if (elapsed >= 20) {
+    stopHeartRate();
+  }
+}
+
+$("hrStart").onclick = startHeartRate;
+$("hrCancel").onclick = stopHeartRate;
