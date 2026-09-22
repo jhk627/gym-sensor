@@ -8,89 +8,143 @@ const ctx = canvas.getContext("2d");
 let stream = null;
 let running = false;
 let trackerTask = null;
-let faceRatio = null;
+
+let rawMetric = null;
+let metric = null;
 let upCalibration = null;
 let downCalibration = null;
 let reps = 0;
 let repState = "WAIT_UP";
-let candidate = "";
-let candidateSince = 0;
 
-const STABLE_MS = 180;
+let candidate = "";
+let candidateHits = 0;
+
+const REQUIRED_HITS = 2;
+const SMOOTH_ALPHA = 0.38;
+const MIN_CALIBRATION_GAP = 0.025;
 
 function setState(text) {
   $("pstate").textContent = text;
 }
 
-function stable(target, now) {
+function debugText() {
+  const current = metric == null ? "--" : (metric * 100).toFixed(1) + "%";
+  const up = upCalibration == null ? "--" : (upCalibration * 100).toFixed(1) + "%";
+  const down = downCalibration == null ? "--" : (downCalibration * 100).toFixed(1) + "%";
+
+  let extra = "";
+  if (upCalibration != null && downCalibration != null) {
+    const delta = downCalibration - upCalibration;
+    const upThreshold = upCalibration + delta * 0.35;
+    const downThreshold = upCalibration + delta * 0.65;
+    extra =
+      " · 판정선 " +
+      (upThreshold * 100).toFixed(1) +
+      "% / " +
+      (downThreshold * 100).toFixed(1) +
+      "%";
+  }
+
+  $("sensorDebug").textContent =
+    "현재값 " + current + " · UP " + up + " · DOWN " + down + extra;
+}
+
+function hit(target) {
   if (candidate !== target) {
     candidate = target;
-    candidateSince = now;
+    candidateHits = 1;
     return false;
   }
-  return now - candidateSince >= STABLE_MS;
+
+  candidateHits += 1;
+  return candidateHits >= REQUIRED_HITS;
 }
 
 function clearCandidate() {
   candidate = "";
-  candidateSince = 0;
+  candidateHits = 0;
 }
 
-function updateRepState(ratio, now) {
-  if (
-    upCalibration == null ||
-    downCalibration == null ||
-    downCalibration <= upCalibration * 1.05
-  ) {
+function calibrationReady() {
+  return (
+    upCalibration != null &&
+    downCalibration != null &&
+    Math.abs(downCalibration - upCalibration) >= MIN_CALIBRATION_GAP
+  );
+}
+
+function updateRepState(value) {
+  debugText();
+
+  if (!calibrationReady()) {
     setState("CALIBRATE");
     return;
   }
 
-  const span = downCalibration - upCalibration;
-  const upThreshold = upCalibration + span * 0.38;
-  const downThreshold = upCalibration + span * 0.62;
+  const delta = downCalibration - upCalibration;
+  const upThreshold = upCalibration + delta * 0.35;
+  const downThreshold = upCalibration + delta * 0.65;
+
+  const downIsLarger = delta > 0;
+
+  const isUp = downIsLarger
+    ? value <= upThreshold
+    : value >= upThreshold;
+
+  const isDown = downIsLarger
+    ? value >= downThreshold
+    : value <= downThreshold;
 
   if (repState === "WAIT_UP") {
-    if (ratio <= upThreshold && stable("UP_READY", now)) {
-      repState = "UP";
+    if (isUp) {
+      if (hit("UP_READY")) {
+        repState = "UP";
+        clearCandidate();
+        setState("UP");
+      }
+    } else {
       clearCandidate();
-      setState("UP");
-    } else if (ratio > upThreshold) {
-      clearCandidate();
+      setState("MOVE TO UP");
     }
     return;
   }
 
   if (repState === "UP") {
-    if (ratio >= downThreshold && stable("DOWN", now)) {
-      repState = "DOWN";
+    if (isDown) {
+      if (hit("DOWN")) {
+        repState = "DOWN";
+        clearCandidate();
+        setState("DOWN");
+      }
+    } else {
       clearCandidate();
-      setState("DOWN");
-    } else if (ratio < downThreshold) {
-      clearCandidate();
+      setState("UP");
     }
     return;
   }
 
   if (repState === "DOWN") {
-    if (ratio <= upThreshold && stable("REP_UP", now)) {
-      repState = "UP";
-      clearCandidate();
-      reps += 1;
-      $("reps").textContent = String(reps);
-      setState("UP");
+    if (isUp) {
+      if (hit("REP_UP")) {
+        repState = "UP";
+        clearCandidate();
+        reps += 1;
+        $("reps").textContent = String(reps);
+        setState("UP");
 
-      if ("speechSynthesis" in window) {
-        try {
-          speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(String(reps));
-          utterance.lang = "ko-KR";
-          utterance.rate = 1.15;
-          speechSynthesis.speak(utterance);
-        } catch {}
+        if ("speechSynthesis" in window) {
+          try {
+            speechSynthesis.cancel();
+            const utterance = new SpeechSynthesisUtterance(String(reps));
+            utterance.lang = "ko-KR";
+            utterance.rate = 1.15;
+            speechSynthesis.speak(utterance);
+          } catch {}
+        }
       }
-    } else if (ratio > upThreshold) {
+    } else {
       clearCandidate();
+      setState("DOWN");
     }
   }
 }
@@ -110,17 +164,12 @@ function handleFaces(event) {
   const faces = event.data || [];
 
   if (!faces.length) {
-    faceRatio = null;
     $("ratio").textContent = "FACE --%";
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    clearCandidate();
-    if (upCalibration == null || downCalibration == null) {
-      setState("FACE?");
-    }
+    setState(repState === "DOWN" ? "DOWN · FACE?" : "FACE?");
     return;
   }
 
-  // Use the largest detected face.
   const face = faces.reduce((best, cur) => {
     if (!best) return cur;
     return cur.width * cur.height > best.width * best.height ? cur : best;
@@ -128,13 +177,16 @@ function handleFaces(event) {
 
   drawFace(face);
 
-  faceRatio =
-    (face.width * face.height) /
-    Math.max(1, canvas.width * canvas.height);
+  // Width ratio is less sensitive to head pitch than face-area ratio.
+  rawMetric = face.width / Math.max(1, canvas.width);
+  metric =
+    metric == null
+      ? rawMetric
+      : SMOOTH_ALPHA * rawMetric + (1 - SMOOTH_ALPHA) * metric;
 
-  $("ratio").textContent = `FACE ${(faceRatio * 100).toFixed(1)}%`;
+  $("ratio").textContent = "FACE " + (metric * 100).toFixed(1) + "%";
 
-  updateRepState(faceRatio, performance.now());
+  updateRepState(metric);
 }
 
 async function start() {
@@ -175,9 +227,9 @@ async function start() {
     canvas.height = video.videoHeight || 480;
 
     const tracker = new window.tracking.ObjectTracker("face");
-    tracker.setInitialScale(4);
-    tracker.setStepSize(2);
-    tracker.setEdgesDensity(0.1);
+    tracker.setInitialScale(3);
+    tracker.setStepSize(1.7);
+    tracker.setEdgesDensity(0.08);
     tracker.on("track", handleFaces);
 
     trackerTask = window.tracking.track(video, tracker, {
@@ -185,12 +237,16 @@ async function start() {
     });
 
     running = true;
+    rawMetric = null;
+    metric = null;
+    clearCandidate();
 
     $("pushStop").disabled = false;
     $("calUp").disabled = false;
     $("calDown").disabled = false;
 
     setState("FACE READY");
+    debugText();
   } catch (err) {
     console.error("Push-up start failed:", err);
     alert(
@@ -239,8 +295,8 @@ async function calibrate(which) {
     return;
   }
 
-  if (faceRatio == null) {
-    alert("얼굴이 카메라에 보이게 해주세요.");
+  if (metric == null) {
+    alert("얼굴이 카메라에 보이고 FACE 값이 표시되는지 확인하세요.");
     return;
   }
 
@@ -251,14 +307,14 @@ async function calibrate(which) {
   button.disabled = true;
   setState(which === "up" ? "HOLD UP" : "HOLD DOWN");
 
-  while (performance.now() - startedAt < 900) {
-    if (faceRatio != null) samples.push(faceRatio);
-    await new Promise((resolve) => setTimeout(resolve, 60));
+  while (performance.now() - startedAt < 1100) {
+    if (metric != null) samples.push(metric);
+    await new Promise((resolve) => setTimeout(resolve, 70));
   }
 
   button.disabled = false;
 
-  if (samples.length < 5) {
+  if (samples.length < 6) {
     alert("얼굴을 안정적으로 인식하지 못했습니다. 다시 시도하세요.");
     return;
   }
@@ -268,42 +324,44 @@ async function calibrate(which) {
 
   if (which === "up") {
     upCalibration = median;
-    $("upVal").textContent = `${(median * 100).toFixed(1)}%`;
+    $("upVal").textContent = (median * 100).toFixed(1) + "%";
   } else {
     downCalibration = median;
-    $("downVal").textContent = `${(median * 100).toFixed(1)}%`;
+    $("downVal").textContent = (median * 100).toFixed(1) + "%";
   }
 
   repState = "WAIT_UP";
   clearCandidate();
+  debugText();
 
   if (
     upCalibration != null &&
     downCalibration != null &&
-    downCalibration <= upCalibration * 1.05
+    Math.abs(downCalibration - upCalibration) < MIN_CALIBRATION_GAP
   ) {
     setState("RECALIBRATE");
     alert(
-      "UP과 DOWN의 얼굴 거리 차이가 너무 작습니다. DOWN에서 얼굴이 카메라에 더 가까워지도록 폰 위치를 조정해 주세요."
+      "UP과 DOWN 값의 차이가 너무 작습니다. 폰을 얼굴 아래쪽에 더 가깝게 두고 다시 보정해 주세요.\n\n현재 UP " +
+        (upCalibration * 100).toFixed(1) +
+        "% / DOWN " +
+        (downCalibration * 100).toFixed(1) +
+        "%"
     );
     return;
   }
 
-  setState(
-    upCalibration != null && downCalibration != null
-      ? "READY"
-      : "CALIBRATE"
-  );
+  setState(calibrationReady() ? "MOVE TO UP" : "CALIBRATE");
 }
 
 $("pushStart").addEventListener("click", start);
 $("pushStop").addEventListener("click", () => stop(true));
+
 $("pushReset").addEventListener("click", () => {
   reps = 0;
   repState = "WAIT_UP";
   clearCandidate();
   $("reps").textContent = "0";
-  setState("READY");
+  setState(calibrationReady() ? "MOVE TO UP" : "READY");
 });
 
 $("calUp").addEventListener("click", () => calibrate("up"));
