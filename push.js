@@ -3,34 +3,31 @@ import { add } from "./base.js";
 const $ = (id) => document.getElementById(id);
 const video = $("pushVideo");
 const canvas = $("pushCanvas");
-const ctx = canvas.getContext("2d", { willReadFrequently: true });
+const ctx = canvas.getContext("2d");
 
 let stream = null;
 let running = false;
+let detector = null;
 let raf = null;
+let busy = false;
 let lastProcess = 0;
 
-let upTemplate = null;
-let downTemplate = null;
-let currentDescriptor = null;
+let faceWidth = null;
+let smoothWidth = null;
+let recentWidths = [];
+
+let upCalibration = null;
+let downCalibration = null;
 
 let reps = 0;
 let repState = "WAIT_UP";
 let candidate = "";
 let candidateHits = 0;
 
-let smoothScore = 0;
-
-const W = 48;
-const H = 36;
-const PROCESS_MS = 110;
+const PROCESS_MS = 90;
 const REQUIRED_HITS = 2;
-const HYSTERESIS = 0.12;
-
-const sampleCanvas = document.createElement("canvas");
-sampleCanvas.width = W;
-sampleCanvas.height = H;
-const sampleCtx = sampleCanvas.getContext("2d", { willReadFrequently: true });
+const SMOOTH_WINDOW = 5;
+const MIN_GAP = 0.035;
 
 function setState(text) {
   $("pstate").textContent = text;
@@ -51,93 +48,77 @@ function hit(target) {
   return candidateHits >= REQUIRED_HITS;
 }
 
-function descriptorFromVideo() {
-  if (video.readyState < 2) return null;
-
-  sampleCtx.drawImage(video, 0, 0, W, H);
-  const data = sampleCtx.getImageData(0, 0, W, H).data;
-  const values = new Float32Array(W * H);
-
-  let mean = 0;
-  for (let i = 0, j = 0; i < data.length; i += 4, j++) {
-    // Luminance.
-    const y = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    values[j] = y;
-    mean += y;
-  }
-  mean /= values.length;
-
-  let variance = 0;
-  for (let i = 0; i < values.length; i++) {
-    const d = values[i] - mean;
-    variance += d * d;
-  }
-
-  const std = Math.sqrt(variance / values.length) || 1;
-
-  // Brightness-normalized descriptor. This makes it less sensitive to exposure changes.
-  for (let i = 0; i < values.length; i++) {
-    values[i] = (values[i] - mean) / std;
-  }
-
-  return values;
+function median(values) {
+  if (!values.length) return null;
+  const a = [...values].sort((x, y) => x - y);
+  return a[Math.floor(a.length / 2)];
 }
 
-function averageDescriptors(list) {
-  if (!list.length) return null;
-  const out = new Float32Array(list[0].length);
-  for (const arr of list) {
-    for (let i = 0; i < out.length; i++) out[i] += arr[i];
+function calibrationReady() {
+  return (
+    upCalibration != null &&
+    downCalibration != null &&
+    Math.abs(downCalibration - upCalibration) >= MIN_GAP
+  );
+}
+
+function updateDebug() {
+  const cur = smoothWidth == null ? "--" : (smoothWidth * 100).toFixed(1) + "%";
+  const up = upCalibration == null ? "--" : (upCalibration * 100).toFixed(1) + "%";
+  const down = downCalibration == null ? "--" : (downCalibration * 100).toFixed(1) + "%";
+
+  let thresholdText = "";
+  if (calibrationReady()) {
+    const delta = downCalibration - upCalibration;
+    const upThreshold = upCalibration + delta * 0.38;
+    const downThreshold = upCalibration + delta * 0.62;
+    thresholdText =
+      " · 판정 " +
+      (upThreshold * 100).toFixed(1) +
+      "% / " +
+      (downThreshold * 100).toFixed(1) +
+      "%";
   }
-  for (let i = 0; i < out.length; i++) out[i] /= list.length;
-  return out;
-}
-
-function distance(a, b) {
-  if (!a || !b || a.length !== b.length) return Infinity;
-  let sum = 0;
-  for (let i = 0; i < a.length; i++) {
-    sum += Math.abs(a[i] - b[i]);
-  }
-  return sum / a.length;
-}
-
-function templateSeparation() {
-  if (!upTemplate || !downTemplate) return 0;
-  return distance(upTemplate, downTemplate);
-}
-
-function classify(desc) {
-  if (!upTemplate || !downTemplate) return null;
-
-  const dUp = distance(desc, upTemplate);
-  const dDown = distance(desc, downTemplate);
-  const denom = dUp + dDown || 1;
-
-  // -1 means UP-like, +1 means DOWN-like.
-  const rawScore = (dUp - dDown) / denom;
-  smoothScore = 0.38 * rawScore + 0.62 * smoothScore;
-
-  const upSimilarity = Math.max(0, Math.min(100, Math.round((1 - dUp / Math.max(templateSeparation(), 0.001)) * 100)));
-  const downSimilarity = Math.max(0, Math.min(100, Math.round((1 - dDown / Math.max(templateSeparation(), 0.001)) * 100)));
 
   $("sensorDebug").textContent =
-    "UP 유사도 " + upSimilarity + "% · DOWN 유사도 " + downSimilarity +
-    "% · SCORE " + smoothScore.toFixed(2);
-
-  $("ratio").textContent = "POSE " + smoothScore.toFixed(2);
-
-  return smoothScore;
+    "현재 얼굴 " + cur + " · UP " + up + " · DOWN " + down + thresholdText;
 }
 
-function updateRep(score) {
-  if (!upTemplate || !downTemplate) {
+function drawBox(box) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const x = (box.xCenter - box.width / 2) * canvas.width;
+  const y = (box.yCenter - box.height / 2) * canvas.height;
+  const w = box.width * canvas.width;
+  const h = box.height * canvas.height;
+
+  ctx.save();
+  ctx.strokeStyle = "#68e290";
+  ctx.lineWidth = Math.max(3, canvas.width * 0.006);
+  ctx.strokeRect(x, y, w, h);
+  ctx.restore();
+}
+
+function updateState(value) {
+  updateDebug();
+
+  if (!calibrationReady()) {
     setState("CALIBRATE");
     return;
   }
 
-  const isUp = score <= -HYSTERESIS;
-  const isDown = score >= HYSTERESIS;
+  const delta = downCalibration - upCalibration;
+  const upThreshold = upCalibration + delta * 0.38;
+  const downThreshold = upCalibration + delta * 0.62;
+  const downIsLarger = delta > 0;
+
+  const isUp = downIsLarger
+    ? value <= upThreshold
+    : value >= upThreshold;
+
+  const isDown = downIsLarger
+    ? value >= downThreshold
+    : value <= downThreshold;
 
   if (repState === "WAIT_UP") {
     if (isUp) {
@@ -193,44 +174,85 @@ function updateRep(score) {
   }
 }
 
-function drawGuide() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const w = canvas.width * 0.72;
-  const h = canvas.height * 0.72;
-  const x = (canvas.width - w) / 2;
-  const y = (canvas.height - h) / 2;
-
-  ctx.save();
-  ctx.strokeStyle = "rgba(104,226,144,.85)";
-  ctx.lineWidth = Math.max(2, canvas.width * 0.004);
-  ctx.setLineDash([12, 10]);
-  ctx.strokeRect(x, y, w, h);
-  ctx.restore();
-}
-
-function loop(now) {
+function onResults(results) {
   if (!running) return;
-  raf = requestAnimationFrame(loop);
 
-  drawGuide();
+  const detections = results?.detections || [];
 
-  if (now - lastProcess < PROCESS_MS) return;
-  lastProcess = now;
-
-  const desc = descriptorFromVideo();
-  if (!desc) return;
-
-  currentDescriptor = desc;
-
-  if (!upTemplate || !downTemplate) {
-    $("ratio").textContent = "POSE READY";
-    setState("CALIBRATE");
+  if (!detections.length) {
+    faceWidth = null;
+    $("ratio").textContent = "FACE --%";
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    setState("FACE?");
+    updateDebug();
     return;
   }
 
-  const score = classify(desc);
-  if (score != null) updateRep(score);
+  // Choose the largest face in case another face appears in the background.
+  const detection = detections.reduce((best, cur) => {
+    const b = cur.boundingBox;
+    const bb = best?.boundingBox;
+    if (!best) return cur;
+    return b.width * b.height > bb.width * bb.height ? cur : best;
+  }, null);
+
+  const box = detection.boundingBox;
+  drawBox(box);
+
+  faceWidth = box.width;
+
+  recentWidths.push(faceWidth);
+  if (recentWidths.length > SMOOTH_WINDOW) recentWidths.shift();
+  smoothWidth = median(recentWidths);
+
+  $("ratio").textContent = "FACE " + (smoothWidth * 100).toFixed(1) + "%";
+
+  updateState(smoothWidth);
+}
+
+async function ensureDetector() {
+  if (detector) return;
+
+  if (!window.FaceDetection) {
+    throw new Error("얼굴 검출 라이브러리를 불러오지 못했습니다.");
+  }
+
+  setState("AI LOADING");
+
+  detector = new window.FaceDetection({
+    locateFile: (file) =>
+      "https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4/" + file
+  });
+
+  detector.setOptions({
+    model: "short",
+    minDetectionConfidence: 0.35
+  });
+
+  detector.onResults(onResults);
+
+  // First send initializes WASM/model assets.
+  await detector.send({ image: video });
+
+  setState("FACE READY");
+}
+
+async function loop(now) {
+  if (!running) return;
+  raf = requestAnimationFrame(loop);
+
+  if (busy || now - lastProcess < PROCESS_MS || video.readyState < 2) return;
+
+  lastProcess = now;
+  busy = true;
+
+  try {
+    await detector.send({ image: video });
+  } catch (err) {
+    console.error("Face detection frame failed:", err);
+  } finally {
+    busy = false;
+  }
 }
 
 async function start() {
@@ -254,7 +276,8 @@ async function start() {
       video: {
         facingMode: "user",
         width: { ideal: 640 },
-        height: { ideal: 480 }
+        height: { ideal: 480 },
+        frameRate: { ideal: 30, max: 30 }
       }
     });
 
@@ -267,23 +290,29 @@ async function start() {
     canvas.height = video.videoHeight || 480;
 
     running = true;
-    smoothScore = 0;
+    faceWidth = null;
+    smoothWidth = null;
+    recentWidths = [];
     clearCandidate();
 
     $("pushStop").disabled = false;
     $("calUp").disabled = false;
     $("calDown").disabled = false;
 
-    setState(upTemplate && downTemplate ? "MOVE TO UP" : "CALIBRATE");
-    $("sensorDebug").textContent = "얼굴 인식 없이 전체 영상 패턴을 비교합니다.";
+    await ensureDetector();
+
+    setState(calibrationReady() ? "MOVE TO UP" : "CALIBRATE");
+    updateDebug();
 
     raf = requestAnimationFrame(loop);
   } catch (err) {
     console.error("Push-up start failed:", err);
+
     alert(
-      (err.message || "카메라를 시작할 수 없습니다.") +
-      "\n\nSafari에서 카메라 권한을 확인해 주세요."
+      (err.message || "카메라 또는 얼굴 검출을 시작할 수 없습니다.") +
+        "\n\nSafari에서 페이지를 새로고침한 뒤 다시 시도해 주세요."
     );
+
     stop(false);
   } finally {
     if (!running) $("pushStart").disabled = false;
@@ -295,6 +324,7 @@ function stop(save = true) {
 
   if (raf) cancelAnimationFrame(raf);
   raf = null;
+  busy = false;
 
   if (stream) {
     stream.getTracks().forEach((track) => track.stop());
@@ -316,9 +346,14 @@ function stop(save = true) {
   setState("READY");
 }
 
-async function captureTemplate(which) {
+async function calibrate(which) {
   if (!running) {
     alert("먼저 START를 눌러 카메라를 시작하세요.");
+    return;
+  }
+
+  if (smoothWidth == null) {
+    alert("얼굴에 초록색 박스가 잡히는지 확인하세요.");
     return;
   }
 
@@ -327,59 +362,48 @@ async function captureTemplate(which) {
 
   setState(which === "up" ? "HOLD UP" : "HOLD DOWN");
 
-  const frames = [];
-  const startedAt = performance.now();
+  const samples = [];
+  const startTime = performance.now();
 
-  while (performance.now() - startedAt < 1200) {
-    const desc = descriptorFromVideo();
-    if (desc) frames.push(desc);
-    await new Promise((resolve) => setTimeout(resolve, 90));
+  while (performance.now() - startTime < 1200) {
+    if (smoothWidth != null) samples.push(smoothWidth);
+    await new Promise((resolve) => setTimeout(resolve, 80));
   }
 
   button.disabled = false;
 
-  if (frames.length < 6) {
-    alert("보정 영상을 충분히 얻지 못했습니다. 다시 시도하세요.");
+  if (samples.length < 6) {
+    alert("얼굴을 안정적으로 검출하지 못했습니다. 다시 시도하세요.");
     return;
   }
 
-  const template = averageDescriptors(frames);
+  const value = median(samples);
 
   if (which === "up") {
-    upTemplate = template;
-    $("upVal").textContent = "SAVED";
+    upCalibration = value;
+    $("upVal").textContent = (value * 100).toFixed(1) + "%";
   } else {
-    downTemplate = template;
-    $("downVal").textContent = "SAVED";
+    downCalibration = value;
+    $("downVal").textContent = (value * 100).toFixed(1) + "%";
   }
 
   repState = "WAIT_UP";
-  smoothScore = 0;
   clearCandidate();
+  updateDebug();
 
-  if (upTemplate && downTemplate) {
-    const sep = templateSeparation();
-
-    if (sep < 0.20) {
-      setState("RECALIBRATE");
-      $("sensorDebug").textContent =
-        "UP/DOWN 영상 차이가 작습니다: " + sep.toFixed(2);
-      alert(
-        "UP과 DOWN 영상 차이가 너무 작습니다.\n\n폰을 얼굴/상체가 더 크게 보이는 위치로 옮기고 다시 보정해 주세요."
-      );
-      return;
-    }
-
-    $("sensorDebug").textContent =
-      "보정 완료 · UP/DOWN 차이 " + sep.toFixed(2);
-    setState("MOVE TO UP");
-  } else {
-    $("sensorDebug").textContent =
-      which === "up"
-        ? "UP 저장 완료 · 이제 DOWN을 보정하세요."
-        : "DOWN 저장 완료 · 이제 UP을 보정하세요.";
-    setState("CALIBRATE");
+  if (
+    upCalibration != null &&
+    downCalibration != null &&
+    Math.abs(downCalibration - upCalibration) < MIN_GAP
+  ) {
+    setState("RECALIBRATE");
+    alert(
+      "UP과 DOWN 얼굴 크기 차이가 너무 작습니다.\n\n폰을 얼굴 앞쪽에 두고 DOWN에서 얼굴이 확실히 더 크게 보이도록 다시 보정해 주세요."
+    );
+    return;
   }
+
+  setState(calibrationReady() ? "MOVE TO UP" : "CALIBRATE");
 }
 
 $("pushStart").addEventListener("click", start);
@@ -388,14 +412,13 @@ $("pushStop").addEventListener("click", () => stop(true));
 $("pushReset").addEventListener("click", () => {
   reps = 0;
   repState = "WAIT_UP";
-  smoothScore = 0;
   clearCandidate();
   $("reps").textContent = "0";
-  setState(upTemplate && downTemplate ? "MOVE TO UP" : "READY");
+  setState(calibrationReady() ? "MOVE TO UP" : "READY");
 });
 
-$("calUp").addEventListener("click", () => captureTemplate("up"));
-$("calDown").addEventListener("click", () => captureTemplate("down"));
+$("calUp").addEventListener("click", () => calibrate("up"));
+$("calDown").addEventListener("click", () => calibrate("down"));
 
 window.addEventListener("pagehide", () => {
   if (running) stop(false);
